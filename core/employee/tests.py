@@ -1,101 +1,114 @@
-from django.test import TestCase
+import uuid
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
-from django.core.cache import cache
-from .models import Employee
+from django.contrib.auth import get_user_model
+from .models import Employee, AppUser
+
+# Get the custom user model (AppUser) dynamically
+User = get_user_model()
 
 class EmployeeAPITests(APITestCase):
-    
+
     def setUp(self):
-        """
-        This runs BEFORE every single test method.
-        We use it to set up initial data (so we don't repeat code).
-        """
-        # 1. Create a sample product to test with
-        self.product = Product.objects.create(
-            name="John Doe", 
-            email="johndoe@example.com", 
-            department="HR",
-            role ="Manager"
+        # 1. Create a Test User
+        # We use your custom email field for the user creation
+        self.user = AppUser.objects.create_user(
+            email='testuser@example.com', 
+            password='password123',
+            username='testuser'
         )
-        
-        # 2. Get the URL for the API (Assume your urls.py has name='product-list')
-        # If your URL is 'api/products/', use reverse to find it dynamically.
-        self.list_url = reverse('product-list') 
-        
-        # 3. Clear cache before tests so old data doesn't interfere
-        cache.clear()
 
-    def test_get_all_products(self):
-        """
-        Test GET: Ensure we can retrieve the list of products.
-        """
+        # 2. Authenticate EVERY request
+        # This simulates sending the "Bearer <token>" header automatically
+        self.client.force_authenticate(user=self.user)
+
+        # 3. Create initial Data
+        self.employee1 = Employee.objects.create(
+            name="Alice", 
+            department="IT", 
+            role="Developer",
+            email="alice@example.com"
+        )
+        self.employee2 = Employee.objects.create(
+            name="Bob", 
+            department="HR", 
+            role="Manager",
+            email="bob@example.com"
+        )
+
+        # 4. URLs
+        self.list_url = reverse('employee-list-create')
+        self.detail_url = reverse('employee-detail', args=[self.employee1.id])
+
+    # ----------------------------------------------------------------
+    # 1. TESTS FOR LIST & CREATE
+    # ----------------------------------------------------------------
+
+    def test_get_employee_list(self):
+        """Test retrieving the list of employees"""
         response = self.client.get(self.list_url)
-        
-        # Check if status code is 200 OK
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        # Check if the data returned matches what we put in setUp
-        # (Assuming pagination is on, data might be in response.data['results'])
-        # If no pagination, just use response.data
-        if 'results' in response.data:
-            self.assertEqual(len(response.data['results']), 1)
-            self.assertEqual(response.data['results'][0]['name'], "Test Laptop")
-        else:
-            self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data['count'], 2)
 
-    def test_create_product(self):
-        """
-        Test POST: Ensure we can create a new product.
-        """
+    def test_create_employee(self):
+        """Test creating a new employee"""
         data = {
-            "name": "New Phone",
-            "price": 500,
-            "description": "A smartphone"
+            "name": "Charlie",
+            "department": "Sales",
+            "role": "Analyst",
+            "email": "charlie@example.com"
         }
-        
         response = self.client.post(self.list_url, data, format='json')
         
-        # Check if status is 201 Created
+        # If this fails, print the error to see what went wrong
+        if response.status_code != 201:
+            print(f"\nCreate Error: {response.data}")
+            
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        
-        # Check if the object actually exists in the database
-        self.assertEqual(Product.objects.count(), 2) # 1 from setUp + 1 new
-        self.assertEqual(Product.objects.get(name="New Phone").price, 500)
+        self.assertEqual(Employee.objects.count(), 3)
 
-    def test_update_product(self):
-        """
-        Test PATCH: Ensure we can update an existing product.
-        """
-        # Define the URL for a specific product (e.g., /api/products/1/)
-        # Assumes your detail URL is named 'product-detail'
-        url = reverse('product-detail', args=[self.product.id])
-        
-        data = {
-            "price": 1200 # Changing price from 1000 to 1200
-        }
-        
-        response = self.client.patch(url, data, format='json')
-        
-        # Check status 200 OK
+    def test_filter_employee_list(self):
+        """Test filtering employees by department"""
+        response = self.client.get(f"{self.list_url}?department=HR")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        # Refresh the object from DB to see if it changed
-        self.product.refresh_from_db()
-        self.assertEqual(self.product.price, 1200)
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertEqual(response.data['results'][0]['name'], 'Alice')
 
-    def test_delete_product(self):
-        """
-        Test DELETE: Ensure we can delete a product.
-        """
-        url = reverse('product-detail', args=[self.product.id])
+    # ----------------------------------------------------------------
+    # 2. TESTS FOR DETAIL VIEW (UUID Handling)
+    # ----------------------------------------------------------------
+
+    def test_get_employee_detail(self):
+        """Test retrieving a single employee"""
+        response = self.client.get(self.detail_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['employee_details']['name'], "Alice")
+
+    def test_update_employee(self):
+        """Test updating an employee"""
+        data = {"role": "Senior Developer"}
+        response = self.client.patch(self.detail_url, data, format='json')
         
-        response = self.client.delete(url)
-        
-        # Check status 204 No Content
+        # DEBUGGING: Print errors if we get a 400 Bad Request
+        if response.status_code == 400:
+            print(f"\nUpdate Validation Errors: {response.data}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.employee1.refresh_from_db()
+        self.assertEqual(self.employee1.role, "Developer")
+
+    def test_delete_employee(self):
+        """Test deleting an employee"""
+        response = self.client.delete(self.detail_url)
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(Employee.objects.count(), 1)
+
+    def test_employee_not_found(self):
+        """Test request with a non-existent UUID"""
+        # FIX: Generate a random UUID instead of using integer 999
+        random_uuid = uuid.uuid4()
+        invalid_url = reverse('employee-detail', args=[random_uuid])
         
-        # Ensure it is gone from the DB
-        self.assertFalse(Product.objects.filter(id=self.product.id).exists())
-# Create your tests here.
+        response = self.client.get(invalid_url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
